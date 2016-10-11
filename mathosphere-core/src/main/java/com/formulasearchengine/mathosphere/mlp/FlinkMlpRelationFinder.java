@@ -9,18 +9,33 @@ import com.formulasearchengine.mathosphere.mlp.evaluation.EvaluatedWikiDocumentO
 import com.formulasearchengine.mathosphere.mlp.pojos.*;
 import com.formulasearchengine.mathosphere.mlp.text.WikiTextUtils;
 
+import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.typeinfo.IntegerTypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.aggregation.Aggregations;
 import org.apache.flink.api.java.io.TextInputFormat;
+import org.apache.flink.api.java.operators.AggregateOperator;
 import org.apache.flink.api.java.operators.DataSource;
+import org.apache.flink.api.java.tuple.Tuple3;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.core.fs.FileSystem.WriteMode;
 import org.apache.flink.core.fs.Path;
+import org.apache.flink.util.Collector;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static org.apache.flink.api.common.typeinfo.BasicTypeInfo.INT_TYPE_INFO;
+import static org.apache.flink.api.common.typeinfo.BasicTypeInfo.STRING_TYPE_INFO;
+import static org.apache.flink.api.java.aggregation.Aggregations.SUM;
 
 public class FlinkMlpRelationFinder {
 
@@ -88,21 +103,13 @@ public class FlinkMlpRelationFinder {
    */
   public static void evaluate(EvalCommandConfig config) throws Exception {
     ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
-    final CreateCandidatesMapper candidatesMapper = new CreateCandidatesMapper(config);
     DataSet<ParsedWikiDocument> documents;
-    if (config.getNoExtract()) {
-      JsonDeserializerMapper deserializer = new JsonDeserializerMapper();
-      DataSource<String> source = readAnnotatedWikiDump(config, env);
-      documents = source.flatMap(deserializer);
-    }
-    else {
-      DataSource<String> source = readWikiDump(config, env);
-      documents =
-        source.flatMap(new TextExtractorMapper())
-          .map(new TextAnnotatorMapper(config));
-    }
-    documents.map(new JsonSerializerMapper<>()).writeAsText(config.getOutputDir() + "-annotated.json", WriteMode.OVERWRITE).setParallelism(1);
+    DataSource<String> source = readWikiDump(config, env);
+    documents =
+      source.flatMap(new TextExtractorMapper())
+        .map(new TextAnnotatorMapper(config));
     Map<String, Object> gold = getGoldDataFromJson(config);
+    final CreateCandidatesMapper candidatesMapper = new CreateCandidatesMapper(config);
     MapFunction<ParsedWikiDocument, EvaluatedWikiDocumentOutput> checker = new MapFunction<ParsedWikiDocument, EvaluatedWikiDocumentOutput>() {
       @Override
       public EvaluatedWikiDocumentOutput map(ParsedWikiDocument parsedWikiDocument) {
@@ -155,10 +162,10 @@ public class FlinkMlpRelationFinder {
         }
         //search for identifiers and their definitions
         final WikiDocumentOutput wikiDocumentOutput = candidatesMapper.map(parsedWikiDocument);
-        EvaluatedWikiDocumentOutput evaluatedWikiDocumentOutput = new EvaluatedWikiDocumentOutput(wikiDocumentOutput);
-        evaluatedWikiDocumentOutput.setGold(gold);
-        evaluatedWikiDocumentOutput.setIdentifierExtractionPrecision(prec);
-        evaluatedWikiDocumentOutput.setIdentifierExtractionRecall(rec);
+        EvaluatedWikiDocumentOutput result = new EvaluatedWikiDocumentOutput(wikiDocumentOutput);
+        result.setGold(goldElement);
+        result.setIdentifierExtractionPrecision(prec);
+        result.setIdentifierExtractionRecall(rec);
         List<Relation> relations = wikiDocumentOutput.getRelations();
         //only look at the definition for the identifiers contained in the true positive set
         relations.removeIf(r -> !tp.contains(r.getIdentifier()));
@@ -166,17 +173,28 @@ public class FlinkMlpRelationFinder {
         int falseDefinitions = 0;
         int correctDefinitions = 0;
         int totalDefinitions = 0;
+        Set<IdentifierDefinition> expectedDef = new HashSet<>();
         for (Relation relation : relations) {
           EvaluatedRelation evaluatedRelation = new EvaluatedRelation(relation);
+          List previousFinds = evaluatedRelations.stream()
+            .filter(er -> er.getIdentifier().equals(evaluatedRelation.getIdentifier()) && er.getDefinition().equals(evaluatedRelation.getDefinition())
+            ).collect(Collectors.toList());
           evaluatedRelations.add(evaluatedRelation);
           final List<String> refList = getDefiniens(definitions, relation);
+          for (String definiens : refList) {
+            expectedDef.add(new IdentifierDefinition(relation.getIdentifier(), definiens.replaceAll("(\\[\\[|\\]\\])", "")));
+          }
           final String definition = relation.getDefinition().replaceAll("(\\[\\[|\\]\\])", "");
           int index = refList.indexOf(definition);
           if (index > -1) {
             evaluatedRelation.setGoldDefinition(refList.get(index));
             //if (refList.get(0).equals(definition)) {
             System.err.print("Correct: ");
-            correctDefinitions++;
+            if (previousFinds.size() == 0) {
+              correctDefinitions++;
+            } else {
+              System.err.print("This definition was found before.");
+            }
           } else {
             evaluatedRelation.setGoldDefinition(refList.get(0));
             System.err.print("Wrong: ");
@@ -184,66 +202,76 @@ public class FlinkMlpRelationFinder {
           }
 
           totalDefinitions++;
-          System.err.println(relation.getIdentifier() + " expected one out of: " + refList.toString() + " was: " + relation.getDefinition() + " score: " + relation.getScore());
-          /*
-          Set<String> tp = new HashSet<>(expected);
-        Set<String> fn = new HashSet<>(expected);
-        Set<String> fp = new HashSet<>(real);
+          System.err.println(relation.getIdentifier() + " expected one out of: " + refList.toString() + " was: " + relation.getDefinition() + "\t score: " + relation.getScore());
+        }
+
+        List<IdentifierDefinition> realDef = evaluatedRelations.stream().map(e -> new IdentifierDefinition(e)).collect(Collectors.toList());
+        realDef.forEach(e -> e.setDefinition(e.getDefinition().replaceAll("(\\[\\[|\\]\\])", "")));
+        Set<IdentifierDefinition> tpDE = new HashSet(expectedDef);
+        Set<IdentifierDefinition> fnDE = new HashSet(expectedDef);
+        Set<IdentifierDefinition> fpDE = new HashSet(realDef);
+        tpDE.retainAll(realDef);
+        fnDE.removeAll(realDef);
+        fpDE.removeAll(expectedDef);
+        /*
+        tp = Set<>(expected);
+        fn =Set<>(expected);
+        fp = Set<>(real);
         fn.removeAll(real);
         fp.removeAll(expected);
         tp.retainAll(real);
-        List expectedDescriptions = (List) definitions.get(relation.getIdentifier());
-        Set<String> tpD = new HashSet<>(expectedDescriptions);
-        Set<String> fnD = new HashSet<>(expectedDescriptions);
-        Set<String> fpD = new HashSet<>(real);
-        fnD.removeAll(real);
-        fpD.removeAll(expected);
-        tpD.retainAll(real);
-        double descriptionPrecision = correctDefinitions / totalDefinitions;
-        double descriptionRecall = correctDefinitions / totalDefinitions;
-        System.err.print("Definition presicion: " + descriptionPrecision + " definition recall: " + descriptionRecall);
         */
-        }
-        List<String> realDecriptionExtractions = evaluatedRelations.stream()
-          .map(r -> r.getIdentifier())
-          .collect(Collectors.toList());
-        Set<String> tpDefinitionExtractions = new HashSet(definitions.keySet());
-        Set<String> fnDefinitionExtractions = new HashSet(definitions.keySet());
-        Set<String> fpDefinitionExtractions = new HashSet(realDecriptionExtractions);
-        tpDefinitionExtractions.retainAll(realDecriptionExtractions);
-        fnDefinitionExtractions.removeAll(realDecriptionExtractions);
-        fpDefinitionExtractions.removeAll(definitions.keySet());
-        double descriptionExtractionRecall = ((double) tpDefinitionExtractions.size()) / (tpDefinitionExtractions.size() + fnDefinitionExtractions.size());
-        double descriptionExtractionPrecision = ((double) tpDefinitionExtractions.size()) / (tpDefinitionExtractions.size() + fpDefinitionExtractions.size());
-        evaluatedWikiDocumentOutput.setRelations(evaluatedRelations);
-        evaluatedWikiDocumentOutput.setDescriptionExtractionPrecision(descriptionExtractionPrecision);
-        evaluatedWikiDocumentOutput.setDescriptionExtractionRecall(descriptionExtractionRecall);
-        System.err.println("Summary " + title + " correct definitions: " + correctDefinitions + " incorrect definitions: " + falseDefinitions);
-        System.err.println("total definitions: " + totalDefinitions + " correct definitions: " + correctDefinitions + " wrong definitions: " + falseDefinitions);
-        System.err.println("Definition extraction precision: " + descriptionExtractionPrecision + " recall: " + descriptionExtractionRecall);
-        System.err.println("tp: " + tpDefinitionExtractions.size() + " fn: " + fnDefinitionExtractions.size() + " fp: " + fpDefinitionExtractions.size());
-        System.err.println("Expected number of extracted definitions: " + definitions.keySet().size());
-        System.err.println(title + "###################END#######################");
-        return evaluatedWikiDocumentOutput;
+        double dRecall = ((double) tpDE.size()) / (tpDE.size() + fnDE.size());
+        double dPrecision = ((double) tpDE.size()) / (tpDE.size() + fpDE.size());
+        result.setTruePositives(tpDE);
+        result.setFalseNegatives(fnDE);
+        result.setFalsePositives(fpDE);
+        result.setRelations(evaluatedRelations);
+        result.setDescriptionExtractionPrecision(dPrecision);
+        result.setDescriptionExtractionRecall(dRecall);
+        syserr(title, definitions, falseDefinitions, correctDefinitions, totalDefinitions, tpDE, fnDE, fpDE, dRecall, dPrecision);
+        return result;
       }
     };
 
     DataSet<EvaluatedWikiDocumentOutput> evaluatedDocuments = documents.map(checker);
-    evaluatedDocuments.map(new JsonSerializerMapper<>()).writeAsText(config.getOutputDir() + "-evaluated.json", WriteMode.OVERWRITE).setParallelism(1);
-    env.setParallelism(1);
-    env.execute("Evaluate Performance");
-    //documents.writeAsText(config.getOutputDir(), WriteMode.OVERWRITE);
-    // rounds down
-    //env.execute("Evaluate Performance");
-//    System.exit(0);
-//
-//    DataSet<WikiDocumentOutput> result = documents.map(new CreateCandidatesMapper(config));
-//
-//    result.map(new JsonSerializerMapper<>())
-//        .writeAsText(config.getOutputDir(), WriteMode.OVERWRITE);
-//    //int cores = Runtime.getRuntime().availableProcessors();
-//    //env.setParallelism(1); // rounds down
-//    env.execute("Evaluate Performance");
+    evaluatedDocuments.map(new MapFunction<EvaluatedWikiDocumentOutput, Object>() {
+      @Override
+      public Object map(EvaluatedWikiDocumentOutput doc) throws Exception {
+        System.err.println(doc.getTitle() + ", " + doc.getFalseNegatives().size() + ", " + doc.getFalsePositives() + ", " + doc.getTruePositives());
+        return doc;
+      }
+    });
+    DataSet<Tuple4<String, Integer, Integer, Integer>> fnfptpData = evaluatedDocuments.map
+      (d -> new Tuple4<String, Integer, Integer, Integer>(
+        d.getTitle(),
+        d.getFalseNegatives().size(),
+        d.getFalsePositives().size(),
+        d.getTruePositives().size())
+      ).returns(new TupleTypeInfo(Tuple4.class, STRING_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO));
+    fnfptpData.map(new MapFunction<Tuple4<String,Integer,Integer,Integer>, Tuple4<String,Integer,Integer,Integer>>() {
+      @Override
+      public Tuple4<String, Integer, Integer, Integer> map(Tuple4<String, Integer, Integer, Integer> value) throws Exception {
+        System.err.println(value.toString());
+        return value;
+      }
+    });
+    fnfptpData
+      .sum(1).andSum(2).andSum(3)
+      .map(t -> new Tuple4<String, Integer, Integer, Integer>("Summary: ", t.f1, t.f2, t.f3))
+      .returns(new TupleTypeInfo(Tuple4.class, STRING_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO))
+      .writeAsText(config.getOutputDir(), WriteMode.OVERWRITE).setParallelism(1);
+    env.execute();
+  }
+
+
+  private static void syserr(String title, Map definitions, int falseDefinitions, int correctDefinitions, int totalDefinitions, Set<IdentifierDefinition> tpDE, Set<IdentifierDefinition> fnDE, Set<IdentifierDefinition> fpDE, double dRecall, double dPrecision) {
+    System.err.println("Summary " + title + " correct definitions: " + correctDefinitions + " incorrect definitions: " + falseDefinitions);
+    System.err.println("total definitions: " + totalDefinitions + " correct definitions: " + correctDefinitions + " wrong definitions: " + falseDefinitions);
+    System.err.println("Definition extraction precision: " + dPrecision + " recall: " + dRecall);
+    System.err.println("tp: " + tpDE.size() + " fn: " + fnDE.size() + " fp: " + fpDE.size());
+    System.err.println("Expected number of extracted definitions: " + definitions.keySet().size());
+    System.err.println(title + "###################END#######################");
   }
 
 
@@ -272,6 +300,7 @@ public class FlinkMlpRelationFinder {
         Map<String, String> var = (Map) definien;
         for (Map.Entry<String, String> stringStringEntry : var.entrySet()) {
           // there is only one entry
+          //remove everything in brackets
           final String def = stringStringEntry.getValue().trim().replaceAll("\\s*\\(.*?\\)$", "");
           result.add(def);
         }
