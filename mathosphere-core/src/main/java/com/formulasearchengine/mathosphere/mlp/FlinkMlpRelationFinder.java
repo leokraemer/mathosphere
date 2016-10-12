@@ -6,36 +6,29 @@ import com.formulasearchengine.mathosphere.mlp.cli.FlinkMlpCommandConfig;
 import com.formulasearchengine.mathosphere.mlp.contracts.*;
 import com.formulasearchengine.mathosphere.mlp.evaluation.EvaluatedRelation;
 import com.formulasearchengine.mathosphere.mlp.evaluation.EvaluatedWikiDocumentOutput;
+import com.formulasearchengine.mathosphere.mlp.evaluation.IdentifierExtractionResult;
 import com.formulasearchengine.mathosphere.mlp.pojos.*;
 import com.formulasearchengine.mathosphere.mlp.text.WikiTextUtils;
 
-import org.apache.flink.api.common.functions.FlatMapFunction;
 import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.common.functions.ReduceFunction;
-import org.apache.flink.api.common.typeinfo.IntegerTypeInfo;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.operators.Order;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.ExecutionEnvironment;
-import org.apache.flink.api.java.aggregation.Aggregations;
 import org.apache.flink.api.java.io.TextInputFormat;
-import org.apache.flink.api.java.operators.AggregateOperator;
+import org.apache.flink.api.java.io.TextOutputFormat;
 import org.apache.flink.api.java.operators.DataSource;
-import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.tuple.Tuple4;
 import org.apache.flink.api.java.typeutils.TupleTypeInfo;
 import org.apache.flink.core.fs.FileSystem.WriteMode;
 import org.apache.flink.core.fs.Path;
-import org.apache.flink.util.Collector;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import static org.apache.flink.api.common.typeinfo.BasicTypeInfo.INT_TYPE_INFO;
 import static org.apache.flink.api.common.typeinfo.BasicTypeInfo.STRING_TYPE_INFO;
-import static org.apache.flink.api.java.aggregation.Aggregations.SUM;
 
 public class FlinkMlpRelationFinder {
 
@@ -213,19 +206,11 @@ public class FlinkMlpRelationFinder {
         tpDE.retainAll(realDef);
         fnDE.removeAll(realDef);
         fpDE.removeAll(expectedDef);
-        /*
-        tp = Set<>(expected);
-        fn =Set<>(expected);
-        fp = Set<>(real);
-        fn.removeAll(real);
-        fp.removeAll(expected);
-        tp.retainAll(real);
-        */
         double dRecall = ((double) tpDE.size()) / (tpDE.size() + fnDE.size());
         double dPrecision = ((double) tpDE.size()) / (tpDE.size() + fpDE.size());
-        result.setTruePositives(tpDE);
-        result.setFalseNegatives(fnDE);
-        result.setFalsePositives(fpDE);
+        result.setTruePositiveDefinitions(tpDE);
+        result.setFalseNegativeDefinitions(fnDE);
+        result.setFalsePositiveDefinitions(fpDE);
         result.setRelations(evaluatedRelations);
         result.setDescriptionExtractionPrecision(dPrecision);
         result.setDescriptionExtractionRecall(dRecall);
@@ -233,23 +218,22 @@ public class FlinkMlpRelationFinder {
         return result;
       }
     };
-
-    DataSet<EvaluatedWikiDocumentOutput> evaluatedDocuments = documents.map(checker);
+    DataSet<EvaluatedWikiDocumentOutput> evaluatedDocuments = documents.map(checker).setParallelism(1);
     evaluatedDocuments.map(new MapFunction<EvaluatedWikiDocumentOutput, Object>() {
       @Override
       public Object map(EvaluatedWikiDocumentOutput doc) throws Exception {
-        System.err.println(doc.getTitle() + ", " + doc.getFalseNegatives().size() + ", " + doc.getFalsePositives() + ", " + doc.getTruePositives());
+        System.err.println(doc.getTitle() + ", " + doc.getFalseNegativeDefinitions().size() + ", " + doc.getFalsePositiveDefinitions() + ", " + doc.getTruePositiveDefinitions());
         return doc;
       }
     });
     DataSet<Tuple4<String, Integer, Integer, Integer>> fnfptpData = evaluatedDocuments.map
       (d -> new Tuple4<String, Integer, Integer, Integer>(
         d.getTitle(),
-        d.getFalseNegatives().size(),
-        d.getFalsePositives().size(),
-        d.getTruePositives().size())
+        d.getFalseNegativeDefinitions().size(),
+        d.getFalsePositiveDefinitions().size(),
+        d.getTruePositiveDefinitions().size())
       ).returns(new TupleTypeInfo(Tuple4.class, STRING_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO));
-    fnfptpData.map(new MapFunction<Tuple4<String,Integer,Integer,Integer>, Tuple4<String,Integer,Integer,Integer>>() {
+    fnfptpData.map(new MapFunction<Tuple4<String, Integer, Integer, Integer>, Tuple4<String, Integer, Integer, Integer>>() {
       @Override
       public Tuple4<String, Integer, Integer, Integer> map(Tuple4<String, Integer, Integer, Integer> value) throws Exception {
         System.err.println(value.toString());
@@ -260,7 +244,90 @@ public class FlinkMlpRelationFinder {
       .sum(1).andSum(2).andSum(3)
       .map(t -> new Tuple4<String, Integer, Integer, Integer>("Summary: ", t.f1, t.f2, t.f3))
       .returns(new TupleTypeInfo(Tuple4.class, STRING_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO, INT_TYPE_INFO))
-      .writeAsText(config.getOutputDir(), WriteMode.OVERWRITE).setParallelism(1);
+      .writeAsText(config.getOutputDir(), WriteMode.OVERWRITE);
+
+    env.setParallelism(1);
+    env.execute();
+  }
+
+  /**
+   * Runs a collection of wikipedia pages through the mpl pipeline and outputs the identifier extraction result to json.
+   *
+   * @param config Specify input, output and other parameters here.
+   * @throws IOException If an input file was parsed incorrectly.
+   */
+
+  public static void extractIdentifiers(EvalCommandConfig config) throws Exception {
+    ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+    DataSet<ParsedWikiDocument> documents;
+    DataSource<String> source = readWikiDump(config, env);
+    documents =
+      source.flatMap(new TextExtractorMapper())
+        .map(new TextAnnotatorMapper(config));
+    Map<String, Object> gold = getGoldDataFromJson(config);
+    final CreateCandidatesMapper candidatesMapper = new CreateCandidatesMapper(config);
+    MapFunction<ParsedWikiDocument, IdentifierExtractionResult> checker = new MapFunction<ParsedWikiDocument, IdentifierExtractionResult>() {
+      @Override
+      public IdentifierExtractionResult map(ParsedWikiDocument parsedWikiDocument) {
+        String title = parsedWikiDocument.getTitle().replaceAll(" ", "_");
+        System.err.println(title + "###################START#######################");
+        //get gold standard entry for the wiki article
+        Map goldElement = (Map) gold.get(title);
+        //get definition of the formula in the gold standard
+        Map formula = (Map) goldElement.get("formula");
+        final Integer fid = Integer.parseInt((String) formula.get("fid"));
+        final String tex = (String) formula.get("math_inputtex");
+        int pos = getFormulaPos(parsedWikiDocument, fid);
+        //get the formula from the wiki document
+        final MathTag seed = parsedWikiDocument.getFormulas().get(pos);
+        //get the found identifiers for the formula from the wiki document
+        final Set<String> real = seed.getIdentifiers(config).elementSet();
+        //get the definitions from the gold standard
+        final Map definitions = (Map) goldElement.get("definitions");
+        //get the expected identifiers from the gold standard
+        final Set expected = definitions.keySet();
+        //calculate precision and recall
+        Set<String> tp = new LinkedHashSet<>(expected);
+        Set<String> fn = new LinkedHashSet<>(expected);
+        Set<String> fp = new LinkedHashSet<>(real);
+        fn.removeAll(real);
+        fp.removeAll(expected);
+        tp.retainAll(real);
+        System.err.println("Identifier extraction: false negatives: " + fn.size() + " false positives: " + fp.size() + " true positives: " + tp.size());
+        double rec = ((double) tp.size()) / (tp.size() + fn.size());
+        double prec = ((double) tp.size()) / (tp.size() + fp.size());
+        if (rec < 1. || prec < 1.) {
+          System.err.println(title + " $" + tex + "$ Precision " + prec + "; Recall " + rec);
+          System.err.println("fp:" + fp.toString());
+          System.err.println("fn:" + fn.toString());
+          System.err.println("https://en.formulasearchengine.com/wiki/" + title + "#math." + formula.get("oldId") + "." + fid);
+        } else {
+          System.err.println(title + " - every expected identifier was found. Checking the definitions now.");
+        }
+        //search for identifiers
+        final WikiDocumentOutput wikiDocumentOutput = candidatesMapper.map(parsedWikiDocument);
+        EvaluatedWikiDocumentOutput e = new EvaluatedWikiDocumentOutput(wikiDocumentOutput);
+        e.setGold(goldElement);
+        IdentifierExtractionResult result = new IdentifierExtractionResult(
+          e.getGold().getqID(),
+          e.getGold().getMathInputTex(),
+          e.getGold().getDefinitions().stream().map(i -> i.getIdentifier()).collect(Collectors.toList()),
+          new ArrayList<>(tp),
+          new ArrayList<>(fp),
+          new ArrayList<>(fn));
+        return result;
+      }
+    };
+
+    DataSet<IdentifierExtractionResult> evaluatedDocuments = documents.map(checker);
+    evaluatedDocuments.map(new JsonSerializerMapper<>())
+      .writeAsFormattedText(config.getOutputDir(), WriteMode.OVERWRITE, new TextOutputFormat.TextFormatter<String>() {
+        @Override
+        public String format(String value) {
+          return value + ",";
+        }
+      });
+    env.setParallelism(1);
     env.execute();
   }
 

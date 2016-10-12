@@ -39,6 +39,7 @@ public class CliParams implements Serializable {
     jc.addCommand("list", params.listCommand);
     jc.addCommand("extract", params.extractCommand);
     jc.addCommand("mlp", params.mlpCommand);
+    jc.addCommand("extractJSON", params.evalCommand);
     jc.addCommand("eval", params.evalCommand);
     jc.addCommand("help", new HelpCommand());
 
