@@ -173,7 +173,7 @@ public class CliMainTest {
         "--queries", resoucePath("com/formulasearchengine/mathosphere/mlp/gold/gold.json"),
         "--nd", resoucePath("com/formulasearchengine/mathosphere/mlp/gold/nd.json"),
         "--tex",
-        "-t", "0.6",
+        "-t", "0.8",
         "--level","2",
         "--ref", resoucePath("com/formulasearchengine/mathosphere/mlp/nd"),
         "--texvcinfo", "http://localhost:10044/texvcinfo"};
