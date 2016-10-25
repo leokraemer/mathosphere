@@ -1,6 +1,7 @@
 package com.formulasearchengine.mathosphere.mlp.cli;
 
 import com.google.common.base.Throwables;
+import com.google.common.io.Files;
 
 import com.formulasearchengine.mathosphere.mlp.Main;
 
@@ -26,7 +27,7 @@ public class CliMainTest {
     temp = File.createTempFile("temp", Long.toString(System.nanoTime()));
     args[0] = "mlp";
     args[1] = "-in";
-    args[2] = resoucePath("com/formulasearchengine/mathosphere/mlp/wikirusample.xml");
+    args[2] = resourcePath("com/formulasearchengine/mathosphere/mlp/wikirusample.xml");
     args[3] = "-out";
     args[4] = temp.getAbsolutePath();
     args[5] = "--language";
@@ -37,9 +38,9 @@ public class CliMainTest {
     runTest(args);
   }
 
-  private String resoucePath(String resorseName) {
+  private String resourcePath(String resourceName) {
     ClassLoader classLoader = getClass().getClassLoader();
-    URL resource = classLoader.getResource(resorseName);
+    URL resource = classLoader.getResource(resourceName);
     return decodePath(resource.getFile());
   }
 
@@ -58,7 +59,7 @@ public class CliMainTest {
     temp = File.createTempFile("temp", Long.toString(System.nanoTime()));
     args[0] = "mlp";
     args[1] = "-in";
-    args[2] = resoucePath("com/formulasearchengine/mathosphere/mlp/ru-sample.xml");
+    args[2] = resourcePath("com/formulasearchengine/mathosphere/mlp/ru-sample.xml");
     args[3] = "-out";
     args[4] = temp.getAbsolutePath();
     args[5] = "--language";
@@ -73,13 +74,20 @@ public class CliMainTest {
   }
 
   @Test
+  public void testHelp() throws Exception {
+    String[] args = new String[1];
+    args[0] = "help";
+    runTest(args);
+  }
+
+  @Test
   public void testMlpEngPlain() throws Exception {
     String[] args = new String[5];
     final File temp;
     temp = File.createTempFile("temp", Long.toString(System.nanoTime()));
     args[0] = "mlp";
     args[1] = "-in";
-    args[2] = resoucePath("com/formulasearchengine/mathosphere/mlp/sample.xml");
+    args[2] = resourcePath("com/formulasearchengine/mathosphere/mlp/sample.xml");
     args[3] = "-out";
     args[4] = temp.getAbsolutePath();
     System.out.println(temp.getAbsolutePath());
@@ -117,7 +125,7 @@ public class CliMainTest {
     String[] args = new String[3];
     args[0] = "extract";
     args[1] = "-in";
-    args[2] = resoucePath("com/formulasearchengine/mathosphere/mlp/hamiltonian_esc.txt");
+    args[2] = resourcePath("com/formulasearchengine/mathosphere/mlp/hamiltonian_esc.txt");
     final PrintStream stdout = System.out;
     final ByteArrayOutputStream myOut = new ByteArrayOutputStream();
     System.setOut(new PrintStream(myOut));
@@ -132,7 +140,7 @@ public class CliMainTest {
     String[] args = new String[4];
     args[0] = "count";
     args[1] = "-in";
-    args[2] = resoucePath("identifier.json");
+    args[2] = resourcePath("identifier.json");
     args[3] = "--ids";
     final PrintStream stdout = System.out;
     final ByteArrayOutputStream myOut = new ByteArrayOutputStream();
@@ -149,7 +157,7 @@ public class CliMainTest {
     String[] args = new String[3];
     args[0] = "count";
     args[1] = "-in";
-    args[2] = resoucePath("tokens.json");
+    args[2] = resourcePath("tokens.json");
     final PrintStream stdout = System.out;
     final ByteArrayOutputStream myOut = new ByteArrayOutputStream();
     System.setOut(new PrintStream(myOut));
@@ -164,20 +172,25 @@ public class CliMainTest {
   @Test
   public void testEval() throws Exception {
     final File temp;
-    temp = File.createTempFile("temp", Long.toString(System.nanoTime()));
+    temp = Files.createTempDir();
+    System.out.println(temp.getAbsolutePath());
     String[] args = {"eval",
-        "-in", resoucePath("com/formulasearchengine/mathosphere/mlp/gold/eval_dataset_sample.xml"),
+        "-in", resourcePath("com/formulasearchengine/mathosphere/mlp/gold/eval_dataset.xml"),
         "-out", temp.getAbsolutePath(),
-        "--queries", resoucePath("com/formulasearchengine/mathosphere/mlp/gold/gold_sample.json"),
-        "--tex"};
+        "--queries", resourcePath("com/formulasearchengine/mathosphere/mlp/gold/gold.json"),
+        "--nd", resourcePath("com/formulasearchengine/mathosphere/mlp/gold/nd.json"),
+        "--tex",
+        "-t", "0.8",
+        "--level","2",
+        "--ref", resourcePath("com/formulasearchengine/mathosphere/mlp/nd"),
+      "--texvcinfo", "http://localhost:10044/texvcinfo"};
     final PrintStream stdout = System.out;
     final ByteArrayOutputStream myOut = new ByteArrayOutputStream();
     System.setOut(new PrintStream(myOut));
     Main.main(args);
     final String standardOutput = myOut.toString();
-    //assertThat(standardOutput, containsString ("W(2, k) > 2^k/k^\\varepsilon"));
     System.setOut(stdout);
-    System.out.println(standardOutput);
+    //System.out.println(standardOutput);
   }
 
 
