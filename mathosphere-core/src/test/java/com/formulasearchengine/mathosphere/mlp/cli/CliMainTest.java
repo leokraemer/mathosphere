@@ -196,7 +196,7 @@ public class CliMainTest {
   @Ignore
   public void testPatternMatcher() throws Exception {
     final File temp = Files.createTempDir();
-    String[] args = {CliParams.EVAL,
+    String[] args = {"eval",
       "-in", resourcePath("com/formulasearchengine/mathosphere/mlp/gold/eval_dataset.xml"),
       "-out", temp.getAbsolutePath(),
       "--queries", resourcePath("com/formulasearchengine/mathosphere/mlp/gold/gold.json"),

@@ -4,6 +4,7 @@ import com.formulasearchengine.mathosphere.mathpd.FlinkPd;
 import com.formulasearchengine.mathosphere.mlp.cli.CliParams;
 import com.formulasearchengine.mathosphere.mlp.text.TokenCounter;
 
+
 /**
  * Created by Moritz on 27.09.2015.
  */
@@ -13,17 +14,17 @@ public class Main {
     CliParams params = CliParams.from(args);
     String command = params.getCommand();
 
-    if (CliParams.HELP.equals(command)) {
+    if ("help".equals(command)) {
       params.printHelp();
-    } else if (CliParams.COUNT.equals(command)) {
+    } else if ("count".equals(command)) {
       TokenCounter.run(params.getCount());
-    } else if (CliParams.LIST.equals(command)) {
+    } else if ("list".equals(command)) {
       RelationExtractor.list(params.getListCommandConfig());
-    } else if (CliParams.EXTRACT.equals(command)) {
+    } else if ("extract".equals(command)) {
       RelationExtractor.run(params.getExtractCommandConfig());
-    } else if (CliParams.MLP.equals(command)) {
+    } else if ("mlp".equals(command)) {
       FlinkMlpRelationFinder.run(params.getMlpCommandConfig());
-    } else if (CliParams.EVAL.equals(command)) {
+    } else if ("eval".equals(command)) {
       FlinkMlpRelationFinder.evaluate(params.getEvalCommandConfig());
     } else if ("pd".equals(command)) {
       FlinkPd.run(params.getPdCommandConfig());
